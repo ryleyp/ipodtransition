@@ -1,0 +1,57 @@
+# iPhone → Mac Music Transfer
+
+Copies the music stored on your iPhone onto your Mac — including music that
+was synced to the phone from a **different** computer, which Finder/iTunes
+refuses to transfer back.
+
+## How it works
+
+Music synced from a computer is stored on the phone in a hidden folder
+(`iTunes_Control/Music`) with scrambled file names. This tool reads that
+folder directly over the USB cable (using the same file service iTunes uses
+— no jailbreak needed), then reads each song's embedded metadata and files
+everything neatly as:
+
+```
+Artist/
+  Album/
+    01 Song Title.m4a
+```
+
+## Usage
+
+1. Plug your iPhone into your Mac with a USB cable and unlock it.
+2. If the phone asks **"Trust This Computer?"**, tap **Trust**.
+3. In Terminal, from this folder:
+
+   ```bash
+   ./transfer_music.sh
+   ```
+
+Your music lands in `~/Music/iPhone Transfer`, organized by artist and
+album. To use a different folder:
+
+```bash
+./transfer_music.sh ~/Desktop/RecoveredMusic
+```
+
+Then in the Music app, choose **File → Import…** and pick that folder.
+
+The first run installs two Python libraries into a private `.venv` folder
+inside this project — nothing else on your Mac is touched. The transfer is
+resumable: if it's interrupted, rerun it and already-copied files are
+skipped.
+
+## Requirements
+
+- macOS with `python3` (if missing, macOS prompts you to install the
+  Command Line Tools — accept, then rerun)
+- A USB cable and your iPhone passcode (to unlock and trust the Mac)
+
+## Limitations
+
+- **Apple Music streaming downloads can't be copied.** They're
+  DRM-protected and stored separately. This tool recovers music that was
+  synced from a computer or purchased on the iTunes Store.
+- Old iTunes Store purchases with DRM (`.m4p` files) will copy over, but
+  only play on a computer signed in to the Apple ID that bought them.
