@@ -235,6 +235,96 @@ def show(track, root, marker=" "):
     print(f"        {track.describe()}")
 
 
+# Verdicts for a transferred song matched against a library song, ordered
+# from strongest to weakest evidence that they are the same thing.
+IDENTICAL = "identical file"
+SAME_RECORDING = "same recording"
+DIFFERENT_VERSION = "different version"
+
+
+def classify_match(transfer, library):
+    """Say how strongly a transferred track matches a library track."""
+    if transfer.size == library.size:
+        if transfer.hash is None:
+            transfer.hash = file_hash(transfer.path)
+        if library.hash is None:
+            library.hash = file_hash(library.path)
+        if transfer.hash == library.hash:
+            return IDENTICAL
+    # Same song re-encoded: artist, album and title must agree, and the
+    # lengths must be within DURATION_TOLERANCE of each other.
+    if metadata_agrees([transfer, library]):
+        return SAME_RECORDING
+    return DIFFERENT_VERSION
+
+
+RANK = {IDENTICAL: 0, SAME_RECORDING: 1, DIFFERENT_VERSION: 2}
+
+
+def compare_to_library(folder_tracks, library_tracks, folder, library_root):
+    """Report which transferred songs already exist in the library.
+
+    Matching is by artist and title first, then each candidate pair is
+    classified. Returns the transfer-side tracks that are safely
+    redundant, keyed by verdict.
+    """
+    index = defaultdict(list)
+    for track in library_tracks:
+        key = track.song_key
+        if key:
+            index[key].append(track)
+
+    matched = []  # (transfer_track, library_track, verdict)
+    for track in folder_tracks:
+        candidates = index.get(track.song_key or (), [])
+        if not candidates:
+            continue
+        best = min(
+            ((c, classify_match(track, c)) for c in candidates),
+            key=lambda pair: RANK[pair[1]],
+        )
+        matched.append((track, best[0], best[1]))
+
+    print("== Already in your library ==============================")
+    if not matched:
+        print("  Nothing in the transferred folder matches a song in your")
+        print("  library by artist and title.")
+        return {}
+
+    by_verdict = defaultdict(list)
+    for track, library_track, verdict in matched:
+        by_verdict[verdict].append((track, library_track))
+
+    headings = {
+        IDENTICAL: "Identical files — same bytes, definitely the same song",
+        SAME_RECORDING: "Same artist, album, title and length — a re-encode "
+                        "of the same song",
+        DIFFERENT_VERSION: "Same artist and title, but album or length "
+                           "differs — likely a DIFFERENT version",
+    }
+    for verdict in (IDENTICAL, SAME_RECORDING, DIFFERENT_VERSION):
+        entries = by_verdict.get(verdict)
+        if not entries:
+            continue
+        print(f"\n  -- {headings[verdict]} ({len(entries)}) --")
+        for track, library_track in entries:
+            print(f"\n  {track.title or track.path.stem} "
+                  f"— {track.artist or 'Unknown Artist'}")
+            show(track, folder, "TRANSFER")
+            show(library_track, library_root, "LIBRARY ")
+
+    redundant = len(by_verdict.get(IDENTICAL, [])) + \
+        len(by_verdict.get(SAME_RECORDING, []))
+    versions = len(by_verdict.get(DIFFERENT_VERSION, []))
+    print(f"\n  {len(matched)} of {len(folder_tracks)} transferred songs "
+          f"match something in your library.")
+    print(f"  {redundant} {'is' if redundant == 1 else 'are'} safely "
+          f"redundant; {versions} "
+          f"{'looks' if versions == 1 else 'look'} like a different version "
+          f"and {'is' if versions == 1 else 'are'} kept.")
+    return by_verdict
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Find duplicate songs in a music folder.",
@@ -257,7 +347,18 @@ def main():
         help="Move byte-identical duplicates to the Trash after confirming. "
              "Never touches 'same song, different file' matches.",
     )
+    parser.add_argument(
+        "--delete-already-in-library",
+        action="store_true",
+        help="With --against: also move transferred songs to the Trash when "
+             "the library already has the same artist, album, title and "
+             "length, even if the file itself differs. Songs whose album or "
+             "length differs are always kept.",
+    )
     args = parser.parse_args()
+    if args.delete_already_in_library and not args.against:
+        sys.exit("--delete-already-in-library needs --against "
+                 "(or --against-library) to compare with.")
 
     folder = Path(args.folder).expanduser().resolve()
     library_root = None
@@ -283,29 +384,34 @@ def main():
             )
 
     seen = set()
-    tracks = scan(folder, "folder", seen)
-    if library_root:
-        tracks += scan(library_root, "library", seen)
+    folder_tracks = scan(folder, "folder", seen)
+    library_tracks = scan(library_root, "library", seen) if library_root else []
+    tracks = folder_tracks + library_tracks
     if not tracks:
         sys.exit("No audio files found.")
 
-    def in_scope(track):
-        """True if deleting this file is allowed (inside FOLDER only)."""
-        return track.path.resolve().is_relative_to(folder)
+    library_matches = {}
+    if library_root:
+        print()
+        library_matches = compare_to_library(
+            folder_tracks, library_tracks, folder, library_root
+        )
+        print()
+        print("== Duplicates within the transferred folder itself ========")
 
     def keep_rank(track):
         """Sort key picking the best copy to keep (lowest sorts first)."""
         return (
-            in_scope(track),  # a copy already in the library wins
             bool(COPY_SUFFIX.search(track.path.stem)),  # avoid "name (2)"
             len(str(track.path)),  # prefer the simpler path
             str(track.path),
         )
 
+    # These sections only ever look inside the transferred folder; anything
+    # shared with the library is covered by the section above.
     print()
-    identical = group_identical(tracks)
+    identical = group_identical(folder_tracks)
     deletable = []
-    protected = False  # duplicates found only inside the --against library
     withheld = []  # identical bytes but disagreeing metadata
     shown_sets = 0
     if identical:
@@ -325,12 +431,8 @@ def main():
                 # Belt and braces: never delete the file we just kept.
                 if extra.path.resolve() == keeper_path:
                     continue
-                allowed = in_scope(extra)
-                show(extra, folder, "DUPE  " if allowed else "dupe* ")
-                if allowed:
-                    deletable.append(extra)
-                else:
-                    protected = True
+                show(extra, folder, "DUPE  ")
+                deletable.append(extra)
         if shown_sets == 0:
             print("  None found.")
         else:
@@ -338,9 +440,6 @@ def main():
             copies = "copy" if len(deletable) == 1 else "copies"
             print(f"\n  {shown_sets} sets, {len(deletable)} deletable "
                   f"{copies}, {wasted / 1_048_576:.1f} MB reclaimable.")
-        if protected:
-            print("  (* outside the checked folder — not offered "
-                  "for deletion)")
     else:
         print("== Identical files ==============================")
         print("  None found.")
@@ -355,7 +454,7 @@ def main():
                 show(track, folder)
 
     already_grouped = {t.path for group in identical for t in group}
-    same_song = group_same_song(tracks, skip=already_grouped)
+    same_song = group_same_song(folder_tracks, skip=already_grouped)
     print()
     print("== Same song, different file ==============================")
     if same_song:
@@ -375,24 +474,49 @@ def main():
     else:
         print("  None found.")
 
-    if not args.delete:
+    # Songs the library already has, if the caller opted into removing them.
+    redundant = []
+    if args.delete_already_in_library:
+        for verdict in (IDENTICAL, SAME_RECORDING):
+            for track, _library_track in library_matches.get(verdict, []):
+                redundant.append(track)
+
+    queued = deletable + [t for t in redundant if t not in deletable]
+
+    if not (args.delete or args.delete_already_in_library):
+        hints = []
         if deletable:
-            print(f"\nRerun with --delete to move the "
-                  f"{len(deletable)} identical copies above to the Trash.")
+            hints.append(f"--delete moves the {len(deletable)} identical "
+                         f"copies above to the Trash")
+        safe_matches = (len(library_matches.get(IDENTICAL, []))
+                        + len(library_matches.get(SAME_RECORDING, [])))
+        if safe_matches:
+            songs = "song" if safe_matches == 1 else "songs"
+            hints.append(f"--delete-already-in-library moves the "
+                         f"{safe_matches} {songs} your library already has "
+                         f"to the Trash")
+        if hints:
+            print("\nNothing has been changed. To act on this report:")
+            for hint in hints:
+                print(f"  {hint}")
         return
 
-    if not deletable:
+    if not queued:
         print("\nNothing to delete.")
         return
-    print(f"\nAbout to move {len(deletable)} byte-identical files to the "
-          f"Trash\n(one copy of each song is kept, and nothing above is "
-          f"erased permanently).")
+    print(f"\nAbout to move {len(queued)} files to the Trash "
+          f"(nothing is erased permanently).")
+    if deletable:
+        print(f"  {len(deletable)} duplicated inside the transferred folder "
+              f"(one copy of each is kept)")
+    if redundant:
+        print(f"  {len(redundant)} already in your music library")
     answer = input("Type 'yes' to continue: ").strip().lower()
     if answer != "yes":
         print("Cancelled. Nothing was moved.")
         return
     removed = 0
-    for track in deletable:
+    for track in queued:
         try:
             move_to_trash(track.path)
             removed += 1

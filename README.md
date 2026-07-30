@@ -58,9 +58,30 @@ After transferring, check for duplicate songs before or after importing:
 
 # delete the byte-identical copies (asks for confirmation first)
 ./check_duplicates.sh --delete
+
+# also remove transferred songs the library already has
+./check_duplicates.sh --against-library --delete-already-in-library
 ```
 
-The report is split into two sections, because they need different handling:
+### Comparing against your Music library
+
+With `--against` (or `--against-library`), the report opens with **Already
+in your library**, which matches transferred songs to library songs by
+artist and title, then grades each match:
+
+| Verdict | Meaning | Removable? |
+| --- | --- | --- |
+| **Identical file** | Same bytes | Yes |
+| **Same recording** | Artist, album, title and length all agree, but the file was re-encoded | Yes |
+| **Different version** | Artist and title agree, but the album or length differs | **No — always kept** |
+
+It ends with a count like "37 of 340 transferred songs match something in
+your library." Nothing is removed unless you pass
+`--delete-already-in-library`, and even then only the first two rows are
+touched — a live, remix, or remastered take is never deleted just because
+it shares a title.
+
+The remaining sections cover duplicates *within* the transferred folder:
 
 - **Identical files** — byte-for-byte the same audio **and** the same
   artist, album, title, and length. Only these are ever deletable. When
