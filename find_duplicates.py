@@ -4,12 +4,16 @@
 Two kinds of duplicates get reported separately, because they need very
 different handling:
 
-1. Identical files - byte-for-byte the same audio. These are always safe to
-   collapse down to one copy, so --delete will do it for you.
+1. Identical files - byte-for-byte the same audio AND the same artist,
+   album, title and length. Only these are ever deletable.
 
 2. Same song, different file - matching artist and title but a different
-   encoding, bitrate, or tag set. Only you can say whether these are real
-   duplicates or a studio/live/remix pair, so they are only ever reported.
+   album, length, encoding or bitrate. These are reported only, never
+   deleted, because a differing album or length usually means a live,
+   remixed or remastered version rather than a copy.
+
+Deletions move files to the Trash, never erase them outright, so anything
+removed by mistake can be put back.
 
 Typical use after a transfer:
 
@@ -17,15 +21,16 @@ Typical use after a transfer:
     ./find_duplicates.py ~/Music/"iPhone Transfer"
 
     # which transferred songs do I already have in my library?
-    ./find_duplicates.py ~/Music/"iPhone Transfer" --against ~/Music/Music/Media
+    ./find_duplicates.py ~/Music/"iPhone Transfer" --against ~/Music/Music/Media.localized
 
-    # delete the byte-identical copies (asks first)
+    # move the byte-identical copies to the Trash (asks first)
     ./find_duplicates.py ~/Music/"iPhone Transfer" --delete
 """
 
 import argparse
 import hashlib
 import re
+import shutil
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -46,10 +51,8 @@ PUNCTUATION = re.compile(r"[^\w\s]", re.UNICODE)
 WHITESPACE = re.compile(r"\s+")
 # Trailing " (2)" that dedupe passes and file managers like to append.
 COPY_SUFFIX = re.compile(r"\s*\((\d+)\)$")
-
-
-def plural(count, noun):
-    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+# Lengths within this many seconds of each other count as the same length.
+DURATION_TOLERANCE = 2.0
 
 
 def normalize(text):
@@ -72,6 +75,19 @@ def file_hash(path):
 def first(tags, key):
     values = tags.get(key) if tags else None
     return str(values[0]) if values else None
+
+
+def move_to_trash(path: Path):
+    """Move a file to ~/.Trash rather than erasing it."""
+    trash = Path.home() / ".Trash"
+    trash.mkdir(exist_ok=True)
+    target = trash / path.name
+    counter = 1
+    while target.exists():
+        target = trash / f"{path.stem} ({counter}){path.suffix}"
+        counter += 1
+    shutil.move(str(path), str(target))
+    return target
 
 
 class Track:
@@ -104,6 +120,16 @@ class Track:
             return None
         return (artist, title)
 
+    @property
+    def identity(self):
+        """Artist, album, title and rounded length, for the delete gate."""
+        return (
+            normalize(self.artist),
+            normalize(self.album),
+            normalize(self.title),
+            None if self.duration is None else round(self.duration),
+        )
+
     def describe(self):
         if self.size < 1_048_576:
             parts = [f"{self.size / 1024:.0f} KB"]
@@ -112,21 +138,58 @@ class Track:
         if self.bitrate:
             parts.append(f"{round(self.bitrate / 1000)} kbps")
         if self.duration:
-            parts.append(f"{int(self.duration // 60)}:{int(self.duration % 60):02d}")
+            parts.append(
+                f"{int(self.duration // 60)}:{int(self.duration % 60):02d}"
+            )
         if self.album:
             parts.append(self.album)
         return ", ".join(parts)
 
 
-def scan(folder: Path, label):
-    """Return Track objects for every audio file under folder."""
+def metadata_agrees(group):
+    """True only if every track agrees on artist, album, title and length.
+
+    A byte-identical group always passes. The check exists so that anything
+    which reached a group some other way - a hash collision, or the same
+    file reached by two different paths - can never be deleted silently.
+    """
+    # Compare real tag values only. Files with no tags at all are not in
+    # disagreement - identical bytes already prove they are the same audio.
+    artists = {normalize(t.artist) for t in group}
+    albums = {normalize(t.album) for t in group}
+    titles = {normalize(t.title) for t in group}
+    if len(artists) > 1 or len(albums) > 1 or len(titles) > 1:
+        return False
+    lengths = [t.duration for t in group if t.duration is not None]
+    if lengths and max(lengths) - min(lengths) > DURATION_TOLERANCE:
+        return False
+    return True
+
+
+def scan(folder: Path, label, seen):
+    """Return Track objects for audio files under folder, skipping any file
+    already seen in an earlier scan (the same file must never be compared
+    against itself)."""
     if not folder.is_dir():
         sys.exit(f"Not a folder: {folder}")
     tracks = []
+    duplicated_paths = 0
     for path in sorted(folder.rglob("*")):
-        if path.is_file() and path.suffix.lower() in AUDIO_EXTENSIONS:
-            tracks.append(Track(path))
+        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+            continue
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path.absolute()
+        if key in seen:
+            duplicated_paths += 1
+            continue
+        seen.add(key)
+        tracks.append(Track(path))
     print(f"Scanned {len(tracks)} audio files in {label}: {folder}")
+    if duplicated_paths:
+        print(f"  (ignored {duplicated_paths} files already covered by "
+              f"another scan)")
     return tracks
 
 
@@ -191,25 +254,44 @@ def main():
     parser.add_argument(
         "--delete",
         action="store_true",
-        help="Delete byte-identical duplicates after confirming. Never "
-             "touches 'same song, different file' matches.",
+        help="Move byte-identical duplicates to the Trash after confirming. "
+             "Never touches 'same song, different file' matches.",
     )
     args = parser.parse_args()
 
     folder = Path(args.folder).expanduser().resolve()
-    tracks = scan(folder, "folder")
     library_root = None
     if args.against:
         library_root = Path(args.against).expanduser().resolve()
+        # An overlapping pair would make every file its own "duplicate".
         if library_root == folder:
             sys.exit("--against must point at a different folder.")
-        tracks += scan(library_root, "library")
+        if folder.is_relative_to(library_root):
+            sys.exit(
+                f"Refusing to run: the folder being checked\n  {folder}\n"
+                f"is inside the library folder\n  {library_root}\n"
+                "Every file would be compared against itself. Point "
+                "--against at your Music library's media folder, not at a "
+                "parent of the folder you are checking."
+            )
+        if library_root.is_relative_to(folder):
+            sys.exit(
+                f"Refusing to run: the library folder\n  {library_root}\n"
+                f"is inside the folder being checked\n  {folder}\n"
+                "Every file would be compared against itself. Point "
+                "--against at a separate folder."
+            )
+
+    seen = set()
+    tracks = scan(folder, "folder", seen)
+    if library_root:
+        tracks += scan(library_root, "library", seen)
     if not tracks:
         sys.exit("No audio files found.")
 
     def in_scope(track):
         """True if deleting this file is allowed (inside FOLDER only)."""
-        return track.path.is_relative_to(folder)
+        return track.path.resolve().is_relative_to(folder)
 
     def keep_rank(track):
         """Sort key picking the best copy to keep (lowest sorts first)."""
@@ -224,26 +306,38 @@ def main():
     identical = group_identical(tracks)
     deletable = []
     protected = False  # duplicates found only inside the --against library
+    withheld = []  # identical bytes but disagreeing metadata
+    shown_sets = 0
     if identical:
-        print(f"== Identical files ({plural(len(identical), 'set')}) "
-              f"==============================")
+        print("== Identical files ==============================")
         for group in sorted(identical, key=lambda g: str(g[0].path)):
+            if not metadata_agrees(group):
+                withheld.append(group)
+                continue
             group.sort(key=keep_rank)
             keeper, extras = group[0], group[1:]
+            shown_sets += 1
             print(f"\n  {keeper.title or keeper.path.stem} "
                   f"— {keeper.artist or 'Unknown Artist'}")
             show(keeper, folder, "KEEP  ")
+            keeper_path = keeper.path.resolve()
             for extra in extras:
+                # Belt and braces: never delete the file we just kept.
+                if extra.path.resolve() == keeper_path:
+                    continue
                 allowed = in_scope(extra)
                 show(extra, folder, "DUPE  " if allowed else "dupe* ")
                 if allowed:
                     deletable.append(extra)
                 else:
                     protected = True
-        wasted = sum(t.size for t in deletable)
-        copies = "copy" if len(deletable) == 1 else "copies"
-        print(f"\n  {len(deletable)} deletable {copies}, "
-              f"{wasted / 1_048_576:.1f} MB reclaimable.")
+        if shown_sets == 0:
+            print("  None found.")
+        else:
+            wasted = sum(t.size for t in deletable)
+            copies = "copy" if len(deletable) == 1 else "copies"
+            print(f"\n  {shown_sets} sets, {len(deletable)} deletable "
+                  f"{copies}, {wasted / 1_048_576:.1f} MB reclaimable.")
         if protected:
             print("  (* outside the checked folder — not offered "
                   "for deletion)")
@@ -251,50 +345,64 @@ def main():
         print("== Identical files ==============================")
         print("  None found.")
 
+    if withheld:
+        print(f"\n  {len(withheld)} sets had identical audio but "
+              f"disagreeing artist/album/title/length —")
+        print("  left alone rather than deleted. Review them by hand:")
+        for group in withheld:
+            print()
+            for track in group:
+                show(track, folder)
+
     already_grouped = {t.path for group in identical for t in group}
     same_song = group_same_song(tracks, skip=already_grouped)
     print()
+    print("== Same song, different file ==============================")
     if same_song:
-        print(f"== Same song, different file "
-              f"({plural(len(same_song), 'set')}) — review these yourself ==")
         for group in sorted(same_song, key=lambda g: str(g[0].path)):
             group.sort(key=lambda t: -(t.bitrate or 0))
+            identities = {t.identity for t in group}
+            verdict = ("looks like the same recording" if len(identities) == 1
+                       else "album/length differ — probably NOT a duplicate")
             print(f"\n  {group[0].title or group[0].path.stem} "
                   f"— {group[0].artist or 'Unknown Artist'}")
+            print(f"    ({verdict})")
             for track in group:
                 show(track, folder)
-        print("\n  These are NOT deleted automatically: different lengths "
-              "or albums\n  usually mean a live, remix, or remastered "
-              "version rather than a copy.")
+        print("\n  None of these are deleted, with or without --delete: a "
+              "differing\n  album or length usually means a live, remix or "
+              "remastered version.")
     else:
-        print("== Same song, different file ==============================")
         print("  None found.")
 
     if not args.delete:
         if deletable:
-            print(f"\nRerun with --delete to remove the "
-                  f"{len(deletable)} identical copies shown above.")
+            print(f"\nRerun with --delete to move the "
+                  f"{len(deletable)} identical copies above to the Trash.")
         return
 
     if not deletable:
         print("\nNothing to delete.")
         return
-    print(f"\nAbout to delete {len(deletable)} byte-identical files "
-          f"(one copy of each song is kept).")
+    print(f"\nAbout to move {len(deletable)} byte-identical files to the "
+          f"Trash\n(one copy of each song is kept, and nothing above is "
+          f"erased permanently).")
     answer = input("Type 'yes' to continue: ").strip().lower()
     if answer != "yes":
-        print("Cancelled. Nothing was deleted.")
+        print("Cancelled. Nothing was moved.")
         return
     removed = 0
     for track in deletable:
         try:
-            track.path.unlink()
+            move_to_trash(track.path)
             removed += 1
         except OSError as err:
-            print(f"  ! Could not delete {track.path}: {err}", file=sys.stderr)
-    print(f"Deleted {removed} duplicate files.")
+            print(f"  ! Could not move {track.path} to the Trash: {err}",
+                  file=sys.stderr)
+    print(f"Moved {removed} duplicate files to the Trash. "
+          f"Recover them from there if this was not what you wanted.")
 
-    # Clean up any album/artist folders left empty by the deletions.
+    # Clean up any album/artist folders left empty by the move.
     for path in sorted(folder.rglob("*"), key=lambda p: -len(p.parts)):
         if path.is_dir() and not any(path.iterdir()):
             path.rmdir()

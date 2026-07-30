@@ -62,12 +62,25 @@ After transferring, check for duplicate songs before or after importing:
 
 The report is split into two sections, because they need different handling:
 
-- **Identical files** — byte-for-byte the same audio. Safe to collapse to
-  one copy, so `--delete` handles these. When comparing against your
-  library, the library copy is always the one kept.
+- **Identical files** — byte-for-byte the same audio **and** the same
+  artist, album, title, and length. Only these are ever deletable. When
+  comparing against your library, the library copy is always the one kept.
 - **Same song, different file** — matching artist and title but a different
-  encoding, bitrate, or album. These are **only reported, never deleted**,
-  since a "duplicate" title is often a live, remix, or remastered version.
+  album, length, encoding, or bitrate. These are **only reported, never
+  deleted**, since a "duplicate" title is often a live, remix, or
+  remastered version.
+
+### Deletion safety rules
+
+- **Nothing is erased.** `--delete` moves files to the **Trash**, so
+  anything removed by mistake can be put back.
+- **Differing artist, album, title, or length means "not a duplicate."**
+  Even byte-identical files are left alone if their tags disagree. Lengths
+  within 2 seconds count as matching, to allow for encoder rounding.
+- **Overlapping folders are refused.** If the `--against` folder contains
+  the folder being checked (or vice versa), the tool stops instead of
+  running — otherwise every file would be compared against itself.
+- The same file reached by two different paths is only ever counted once.
 
 Files are only hashed when another file shares their exact byte size, so a
 large library isn't read end to end unnecessarily.
