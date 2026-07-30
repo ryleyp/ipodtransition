@@ -26,6 +26,13 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
+if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)'; then
+    echo "Python 3.9 or newer is required (found $(python3 -V 2>&1))." >&2
+    echo "Install a current Python from https://www.python.org/downloads/" >&2
+    echo "or with Homebrew: brew install python3" >&2
+    exit 1
+fi
+
 if [[ ! -x "$VENV_DIR/bin/python" ]]; then
     echo "First run: setting up a private Python environment..."
     python3 -m venv "$VENV_DIR"

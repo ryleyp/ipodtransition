@@ -44,9 +44,12 @@ skipped.
 
 ## Requirements
 
-- macOS with `python3` (if missing, macOS prompts you to install the
-  Command Line Tools — accept, then rerun)
+- macOS with `python3` 3.9 or newer (if missing, macOS prompts you to
+  install the Command Line Tools — accept, then rerun)
 - A USB cable and your iPhone passcode (to unlock and trust the Mac)
+
+Works with both the modern async `pymobiledevice3` (10.x) and the older
+synchronous 4.x releases.
 
 ## Limitations
 
