@@ -42,6 +42,38 @@ inside this project — nothing else on your Mac is touched. The transfer is
 resumable: if it's interrupted, rerun it and already-copied files are
 skipped.
 
+## Checking for duplicates
+
+After transferring, check for duplicate songs before or after importing:
+
+```bash
+# duplicates inside the transferred folder
+./check_duplicates.sh
+
+# songs you already have in your Music library
+./check_duplicates.sh --against-library
+
+# delete the byte-identical copies (asks for confirmation first)
+./check_duplicates.sh --delete
+```
+
+The report is split into two sections, because they need different handling:
+
+- **Identical files** — byte-for-byte the same audio. Safe to collapse to
+  one copy, so `--delete` handles these. When comparing against your
+  library, the library copy is always the one kept.
+- **Same song, different file** — matching artist and title but a different
+  encoding, bitrate, or album. These are **only reported, never deleted**,
+  since a "duplicate" title is often a live, remix, or remastered version.
+
+Files are only hashed when another file shares their exact byte size, so a
+large library isn't read end to end unnecessarily.
+
+The Music app also has a built-in check: **File → Library → Show Duplicate
+Items**. It matches on name and artist only, so it flags live and remixed
+versions as duplicates too — hold **Option** and use **Show Exact Duplicate
+Items** to also match on album and length.
+
 ## Requirements
 
 - macOS with `python3` 3.9 or newer (if missing, macOS prompts you to
