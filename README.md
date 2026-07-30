@@ -74,10 +74,18 @@ large library isn't read end to end unnecessarily.
 
 `--against-library` locates your library automatically, covering the Music
 app (`~/Music/Music/Media`), older iTunes installs
-(`~/Music/iTunes/iTunes Media`), and non-default library names, and it skips
-empty folders that only look like a library. If your library lives on an
-external drive, find its path under **Music → Settings → Files** and pass it
-with `--against` instead.
+(`~/Music/iTunes/iTunes Media`), macOS's localized folder names
+(`Media.localized`), and non-default library names — and it skips empty
+folders that only look like a library.
+
+If it guesses wrong or your library is on an external drive, find the path
+under **Music → Settings → Files** ("Music Media folder location") and pass
+it yourself. Either spelling works:
+
+```bash
+./check_duplicates.sh ~/Music/"iPhone Transfer" --against '/path/to/Media'
+./check_duplicates.sh ~/Music/"iPhone Transfer" --against-library '/path/to/Media'
+```
 
 The Music app also has a built-in check: **File → Library → Show Duplicate
 Items**. It matches on name and artist only, so it flags live and remixed

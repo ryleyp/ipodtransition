@@ -46,53 +46,64 @@ has_audio() {
 }
 
 # Print the Music/iTunes media folder, or nothing if it can't be found.
+# The trailing * on each folder name matches macOS's localized names, where
+# the real folder is "Media.localized" rather than "Media".
 find_library() {
     local candidates=(
-        # Music app (Catalina and later)
-        "$HOME/Music/Music/Media/Music"
-        "$HOME/Music/Music/Media"
+        # Music app (Catalina and later); the Music subfolder first, so we
+        # skip sibling Movies/Podcasts/TV Shows folders.
+        "$HOME/Music/Music/Media"*/"Music"*
+        "$HOME/Music/Music/Media"*
         # iTunes (Mojave and earlier)
-        "$HOME/Music/iTunes/iTunes Media/Music"
-        "$HOME/Music/iTunes/iTunes Media"
+        "$HOME/Music/iTunes/iTunes Media"*/"Music"*
+        "$HOME/Music/iTunes/iTunes Media"*
+        # Libraries with a non-default name, e.g. ~/Music/My Library/Media.
+        "$HOME/Music"/*/"Media"*/"Music"*
+        "$HOME/Music"/*/"Media"*
+        "$HOME/Music"/*/"iTunes Media"*/"Music"*
+        "$HOME/Music"/*/"iTunes Media"*
     )
-    # Libraries with a non-default name, e.g. ~/Music/My Library/Media.
-    local extra
-    for extra in "$HOME/Music"/*/Media/Music "$HOME/Music"/*/Media \
-                 "$HOME/Music"/*/"iTunes Media/Music" \
-                 "$HOME/Music"/*/"iTunes Media"; do
-        [[ -d "$extra" ]] && candidates+=("$extra")
-    done
 
+    # Unmatched globs stay literal, and has_audio's -d test discards them.
     local dir
-    # Prefer a folder that actually holds music.
     for dir in "${candidates[@]}"; do
         if has_audio "$dir"; then
             printf '%s\n' "$dir"
             return 0
         fi
     done
-    # Last resort: anything named Media/iTunes Media under ~/Music.
+    # Last resort: any media folder under ~/Music, localized or not.
     while IFS= read -r dir; do
         if has_audio "$dir"; then
             printf '%s\n' "$dir"
             return 0
         fi
-    done < <(find "$HOME/Music" -maxdepth 3 -type d \
-                \( -name 'Media' -o -name 'iTunes Media' \) 2>/dev/null)
+    done < <(find "$HOME/Music" -maxdepth 4 -type d \
+                \( -name 'Media' -o -name 'Media.localized' \
+                   -o -name 'iTunes Media' \
+                   -o -name 'iTunes Media.localized' \) 2>/dev/null)
     return 1
 }
 
 # --against-library is a shorthand for "wherever my Music library lives".
 ARGS=()
-for arg in "$@"; do
-    if [[ "$arg" == "--against-library" ]]; then
-        LIBRARY="$(find_library || true)"
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--against-library" ]]; then
+        # Accept `--against-library /path/to/Media` as a synonym for
+        # `--against /path/to/Media`, since the two are easy to mix up.
+        if [[ $# -gt 1 && -d "$2" ]]; then
+            LIBRARY="$2"
+            shift
+        else
+            LIBRARY="$(find_library || true)"
+        fi
         if [[ -z "$LIBRARY" ]]; then
             echo "Could not find a Music library containing audio files." >&2
             echo >&2
-            echo "Looked in ~/Music for the Music app's Media folder and" >&2
-            echo "iTunes' 'iTunes Media' folder. Yours may be on an external" >&2
-            echo "drive, or you may not have imported anything yet." >&2
+            echo "Looked under ~/Music for the Music app's Media folder and" >&2
+            echo "iTunes' 'iTunes Media' folder (including the '.localized'" >&2
+            echo "spellings). Yours may be on an external drive, or you may" >&2
+            echo "not have imported anything into Music yet." >&2
             echo >&2
             echo "To find the real path: open Music, then Music > Settings >" >&2
             echo "Files. The 'Music Media folder location' is shown there." >&2
@@ -109,8 +120,9 @@ for arg in "$@"; do
         echo "Using Music library: $LIBRARY"
         ARGS+=("--against" "$LIBRARY")
     else
-        ARGS+=("$arg")
+        ARGS+=("$1")
     fi
+    shift
 done
 
 # Guard the expansion: an empty array trips `set -u` on macOS's bash 3.2.
