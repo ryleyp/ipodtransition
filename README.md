@@ -53,6 +53,9 @@ After transferring, check for duplicate songs before or after importing:
 # songs you already have in your Music library
 ./check_duplicates.sh --against-library
 
+# ...or point at the library folder yourself
+./check_duplicates.sh ~/Music/"iPhone Transfer" --against /path/to/Media
+
 # delete the byte-identical copies (asks for confirmation first)
 ./check_duplicates.sh --delete
 ```
@@ -68,6 +71,13 @@ The report is split into two sections, because they need different handling:
 
 Files are only hashed when another file shares their exact byte size, so a
 large library isn't read end to end unnecessarily.
+
+`--against-library` locates your library automatically, covering the Music
+app (`~/Music/Music/Media`), older iTunes installs
+(`~/Music/iTunes/iTunes Media`), and non-default library names, and it skips
+empty folders that only look like a library. If your library lives on an
+external drive, find its path under **Music → Settings → Files** and pass it
+with `--against` instead.
 
 The Music app also has a built-in check: **File → Library → Show Duplicate
 Items**. It matches on name and artist only, so it flags live and remixed
